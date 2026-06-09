@@ -1,0 +1,13 @@
+# Frontend
+frontend/node_modules/
+frontend/.svelte-kit/
+frontend/build/
+frontend/.env
+
+# Docs (keep only README.md)
+docs/
+
+CLAUDE.md
+
+# Mac
+.DS_Store
