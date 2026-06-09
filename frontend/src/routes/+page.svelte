@@ -2,7 +2,8 @@
   import { onMount } from 'svelte';
 
   const BACKEND_URL = import.meta.env.VITE_BACKEND_URL ?? 'http://localhost:3000';
-  const SUPERSET_URL = import.meta.env.VITE_SUPERSET_URL ?? 'http://localhost:8088';
+  // All Superset traffic goes through the Go backend proxy — never direct to :8088
+  const SUPERSET_PROXY_URL = `${BACKEND_URL}/superset`;
   const DASHBOARD_ID = import.meta.env.VITE_DASHBOARD_ID ?? '';
 
   let container: HTMLDivElement;
@@ -36,7 +37,7 @@
       const embedDashboard = sdk.embedDashboard ?? (sdk as any).default?.embedDashboard;
       await embedDashboard({
         id: DASHBOARD_ID,
-        supersetDomain: SUPERSET_URL,
+        supersetDomain: SUPERSET_PROXY_URL,
         mountPoint: container,
         fetchGuestToken,
         dashboardUiConfig: {

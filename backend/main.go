@@ -8,13 +8,15 @@ import (
 	"log"
 	"net/http"
 	"net/http/cookiejar"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"sync"
 	"time"
 )
 
 var (
-	supersetURL = getenv("SUPERSET_URL", "http://localhost:8088")
+	supersetURL = getenv("SUPERSET_URL", "http://superset:8088")
 	adminUser   = getenv("SUPERSET_ADMIN_USER", "admin")
 	adminPass   = getenv("SUPERSET_ADMIN_PASS", "admin")
 	dashboardID = getenv("GUEST_DASHBOARD_ID", "")
@@ -48,7 +50,6 @@ func login() error {
 		return nil
 	}
 
-	// Step 1: get access token
 	body, _ := json.Marshal(map[string]string{
 		"username": adminUser,
 		"password": adminPass,
@@ -69,7 +70,6 @@ func login() error {
 	}
 	accessToken = loginResult.AccessToken
 
-	// Step 2: get CSRF token (required for POST endpoints)
 	req, _ := http.NewRequest(http.MethodGet, supersetURL+"/api/v1/security/csrf_token/", nil)
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Referer", supersetURL)
@@ -92,6 +92,7 @@ func login() error {
 	return nil
 }
 
+// guestTokenHandler issues a short-lived guest JWT for the requested dashboard.
 func guestTokenHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost && r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -147,6 +148,36 @@ func guestTokenHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write(body)
 }
 
+// supersetProxy reverse-proxies all /superset/* traffic to Superset.
+// The browser never talks to Superset directly — everything goes through here.
+func supersetProxy() http.Handler {
+	target, _ := url.Parse(supersetURL)
+	proxy := httputil.NewSingleHostReverseProxy(target)
+
+	// Fix up response headers so assets load correctly through the proxy
+	originalDirector := proxy.Director
+	proxy.Director = func(req *http.Request) {
+		originalDirector(req)
+		// Strip the /superset prefix before forwarding
+		req.URL.Path = req.URL.Path[len("/superset"):]
+		if req.URL.Path == "" {
+			req.URL.Path = "/"
+		}
+		req.Host = target.Host
+		req.Header.Set("X-Forwarded-Host", req.Host)
+		req.Header.Set("X-Forwarded-Proto", "http")
+	}
+
+	proxy.ModifyResponse = func(resp *http.Response) error {
+		// Allow iframe embedding
+		resp.Header.Del("X-Frame-Options")
+		resp.Header.Set("X-Frame-Options", "ALLOWALL")
+		return nil
+	}
+
+	return proxy
+}
+
 var allowedOrigins = func() map[string]bool {
 	origins := map[string]bool{
 		"http://localhost:5173": true,
@@ -164,8 +195,8 @@ func corsMiddleware(next http.Handler) http.Handler {
 		if allowedOrigins[origin] {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 		}
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-GuestToken, X-CSRFToken")
 		w.Header().Set("Access-Control-Allow-Credentials", "true")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
@@ -177,12 +208,18 @@ func corsMiddleware(next http.Handler) http.Handler {
 
 func main() {
 	mux := http.NewServeMux()
+
+	// Backend-owned endpoints
 	mux.HandleFunc("/api/guest-token", guestTokenHandler)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"status":"ok"}`))
 	})
 
+	// Proxy all Superset traffic — browser never talks to :8088 directly
+	mux.Handle("/superset/", supersetProxy())
+
 	addr := ":" + port
 	log.Printf("Go backend listening on %s", addr)
+	log.Printf("Proxying Superset at %s via /superset/", supersetURL)
 	log.Fatal(http.ListenAndServe(addr, corsMiddleware(mux)))
 }
