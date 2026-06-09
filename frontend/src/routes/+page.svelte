@@ -2,9 +2,9 @@
   import { onMount } from 'svelte';
 
   const BACKEND_URL = import.meta.env.VITE_BACKEND_URL ?? 'http://localhost:3000';
-  // All Superset traffic goes through the Go backend proxy — never direct to :8088
-  const SUPERSET_PROXY_URL = `${BACKEND_URL}/superset`;
   const DASHBOARD_ID = import.meta.env.VITE_DASHBOARD_ID ?? '';
+  // All Superset traffic proxied through Go backend — no direct Superset URL in frontend
+  const SUPERSET_PROXY_URL = `${BACKEND_URL}/superset`;
 
   let container: HTMLDivElement;
   let error = $state('');
