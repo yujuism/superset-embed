@@ -148,31 +148,35 @@ func guestTokenHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write(body)
 }
 
-// supersetProxy reverse-proxies all /superset/* traffic to Superset.
-// The browser never talks to Superset directly — everything goes through here.
-func supersetProxy() http.Handler {
+// newSupersetProxy creates a reverse proxy that forwards all traffic to Superset.
+// Superset assets use absolute paths (/static/, /api/, /embedded/, etc.)
+// so we proxy everything at root — the Go backend's own routes (/api/guest-token,
+// /health) take priority via the ServeMux, everything else falls through to Superset.
+func newSupersetProxy() http.Handler {
 	target, _ := url.Parse(supersetURL)
 	proxy := httputil.NewSingleHostReverseProxy(target)
 
-	// Fix up response headers so assets load correctly through the proxy
-	originalDirector := proxy.Director
 	proxy.Director = func(req *http.Request) {
-		originalDirector(req)
-		// Strip the /superset prefix before forwarding
-		req.URL.Path = req.URL.Path[len("/superset"):]
-		if req.URL.Path == "" {
-			req.URL.Path = "/"
-		}
+		req.URL.Scheme = target.Scheme
+		req.URL.Host = target.Host
 		req.Host = target.Host
 		req.Header.Set("X-Forwarded-Host", req.Host)
 		req.Header.Set("X-Forwarded-Proto", "http")
+		// Forward the real referer so Superset's domain whitelist check passes
+		if ref := req.Header.Get("Referer"); ref == "" {
+			req.Header.Set("Referer", supersetURL)
+		}
 	}
 
 	proxy.ModifyResponse = func(resp *http.Response) error {
-		// Allow iframe embedding
 		resp.Header.Del("X-Frame-Options")
 		resp.Header.Set("X-Frame-Options", "ALLOWALL")
 		return nil
+	}
+
+	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+		log.Printf("proxy error for %s: %v", r.URL.Path, err)
+		http.Error(w, "superset unavailable", http.StatusBadGateway)
 	}
 
 	return proxy
@@ -207,19 +211,22 @@ func corsMiddleware(next http.Handler) http.Handler {
 }
 
 func main() {
+	supersetProxy := newSupersetProxy()
+
 	mux := http.NewServeMux()
 
-	// Backend-owned endpoints
+	// Backend-owned endpoints — registered first, take priority
 	mux.HandleFunc("/api/guest-token", guestTokenHandler)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"status":"ok"}`))
 	})
 
-	// Proxy all Superset traffic — browser never talks to :8088 directly
-	mux.Handle("/superset/", supersetProxy())
+	// Catch-all: proxy everything else to Superset
+	// This covers /embedded/, /static/, /api/v1/ (Superset's), /login/, etc.
+	mux.Handle("/", supersetProxy)
 
 	addr := ":" + port
 	log.Printf("Go backend listening on %s", addr)
-	log.Printf("Proxying Superset at %s via /superset/", supersetURL)
+	log.Printf("Proxying Superset at %s", supersetURL)
 	log.Fatal(http.ListenAndServe(addr, corsMiddleware(mux)))
 }
